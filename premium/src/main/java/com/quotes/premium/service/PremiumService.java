@@ -434,7 +434,7 @@ public class PremiumService {
         applicables.forEach(app->app.setPreferredHospitalNetwork(app.getBasePremium()* this.preferredHospitalNetwork));
     }
 
-    public void handleInfiniteCare(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleLimitlessCare(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isLimitlessCare()){
             return ;
         }
@@ -511,7 +511,7 @@ public class PremiumService {
         }
     }
 
-    public void handlePowerBooster(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleSuperstarBonus(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isSuperstarBonus())
             return ;
 
