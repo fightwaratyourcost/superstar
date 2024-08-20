@@ -9,5 +9,7 @@ import lombok.Setter;
 @Builder
 public class EmiResponse {
     private boolean emi;
-    private Double amount ;
+    private long amount ;
+    private int instalments;
+    private String duration;
 }

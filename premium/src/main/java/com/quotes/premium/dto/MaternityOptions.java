@@ -7,6 +7,6 @@ import lombok.Setter;
 @Getter
 @Setter
 public class MaternityOptions{
-    private String option;
+    private String option; // A, B & C
     private Double subLimit;
 }

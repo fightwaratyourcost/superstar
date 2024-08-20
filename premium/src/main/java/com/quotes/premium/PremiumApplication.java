@@ -1,7 +1,7 @@
 package com.quotes.premium;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.quotes.premium.dto.AmountDivision;
+import com.quotes.premium.dto.PremiumResponse;
 import com.quotes.premium.dto.ApiResponse;
 import com.quotes.premium.dto.PremiumRequest;
 import com.quotes.premium.service.PremiumService;
@@ -27,7 +27,7 @@ public class PremiumApplication {
 		return (final String... commandLineArgs) -> {
 			if (0 < commandLineArgs.length) {
 				final String input = commandLineArgs[0];
-				final ApiResponse<AmountDivision> result = (this.premiumService.calculatePremium(objectMapper.readValue(input, PremiumRequest.class)));
+				final ApiResponse<PremiumResponse> result = (this.premiumService.calculatePremium(objectMapper.readValue(input, PremiumRequest.class)));
 				System.out.println("Premium: " + result);
 			}
 		};

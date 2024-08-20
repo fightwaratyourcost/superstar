@@ -10,5 +10,5 @@ import lombok.Setter;
 public class CibilScoreRequest {
 
     private boolean cibil;
-    private int cibilScore;
+    private int cibilScore; // TODO change cibil logic.
 }

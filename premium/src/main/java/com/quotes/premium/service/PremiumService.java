@@ -1,10 +1,12 @@
 package com.quotes.premium.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.quotes.premium.config.BasePremiumConfig;
 import com.quotes.premium.config.DynamicConfigurations;
 import com.quotes.premium.config.MandatoryConfiguration;
 import com.quotes.premium.dto.*;
-import com.quotes.premium.exception.SuperstarException;
 import com.quotes.premium.operation.OperationRegistry;
 import com.quotes.premium.utils.Utils;
 import lombok.extern.log4j.Log4j2;
@@ -12,9 +14,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 @Log4j2
@@ -44,10 +48,14 @@ public class PremiumService {
     private Double sublimitModeration;
     @Value("${preferred.hospital.network}")
     private Double preferredHospitalNetwork;
+    @Value("${summary.map}")
+    private String summary;
 
-    public ApiResponse<AmountDivision> calculatePremium(final PremiumRequest premiumRequest) {
+    public ApiResponse<PremiumResponse> calculatePremium(final PremiumRequest premiumRequest) {
         try{
-            return ApiResponse.buildResponse(this.calculate(premiumRequest), "success", true);
+            final PremiumResponse premiumResponse = this.calculate(premiumRequest);
+            this.createSummary(premiumResponse);
+            return ApiResponse.buildResponse(premiumResponse, "success", true);
         }
         catch(final InvocationTargetException e){
             return ApiResponse.buildResponse(null, ((InvocationTargetException) e).getTargetException().toString(), false);
@@ -57,24 +65,73 @@ public class PremiumService {
         }
     }
 
-    private AmountDivision calculate(final PremiumRequest premiumRequest) throws Exception {
+    private void createSummary(final PremiumResponse premiumResponse) throws JsonProcessingException {
+        final Map<String, List<String>> coverMap;
+        coverMap = new ObjectMapper().readValue(
+                summary,
+                new TypeReference<Map<String, List<String>>>() {}
+        );
+
+        for(Map.Entry<String, List<String>> entry : coverMap.entrySet()){
+            final AtomicReference<Double> totalCover = new AtomicReference<>(0d);
+            final String key = entry.getKey();
+            for(final String cover : entry.getValue()){
+                for(final Applicable app : premiumResponse.getApplicables()){
+                    totalCover.updateAndGet(v -> v + this.getCover(app, cover));
+                }
+            }
+
+            switch(key){
+                case "lifestyle" :{
+                    premiumResponse.setLifestyleDiscount(totalCover.get());
+                    break ;
+                }
+
+                case "optionalCovers" :{
+                    premiumResponse.setTotalOptionalCovers(totalCover.get());
+                    break;
+                }
+
+                case "discounts": {
+                    premiumResponse.setTotalDiscounts(totalCover.get());
+                    break;
+                }
+            }
+        }
+    }
+
+    private Double getCover(Applicable obj, String cover) {
+        final Field field;
+        try {
+            field = Applicable.class.getDeclaredField(cover);
+            field.setAccessible(true);
+            return (Double) field.get(obj);
+        } catch (NoSuchFieldException e) {
+            throw new RuntimeException(e);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+
+    }
+
+    private PremiumResponse calculate(final PremiumRequest premiumRequest) throws Exception {
         this.validationService.validatePremiumRequest(premiumRequest, this.mandatoryConfiguration.getValidationKeys());
         final Map<String, Attribute> confMap = this.mandatoryConfiguration.getConf(premiumRequest.getPolicyType(), premiumRequest.isFresh());
         final List<String> executionKeys = this.mandatoryConfiguration.getExecutionKeys();
-        final AmountDivision amountDivision = new AmountDivision();
-        this.createInsuredMapping(amountDivision, premiumRequest);
+        final PremiumResponse premiumResponse = new PremiumResponse();
+        this.createInsuredMapping(premiumResponse, premiumRequest);
         for (final String key : executionKeys) {
             PremiumService.log.info("Handling execution key: {}", key);
             final Attribute attribute = confMap.get(key);
-            final List<Applicable> applicables = Utils.get(this.mandatoryConfiguration.getFeature(key, premiumRequest.getPolicyType(), premiumRequest.isFresh()), amountDivision.getApplicables());
-            final Method method = this.getClass().getMethod("handle" + Utils.capitalizeFirstLetter(key), AmountDivision.class, PremiumRequest.class, List.class);
-            method.invoke(this, amountDivision, premiumRequest, applicables);
-            amountDivision.getApplicables().forEach(app -> {
+            final List<Applicable> applicables = Utils.get(this.mandatoryConfiguration.getFeature(key, premiumRequest.getPolicyType(), premiumRequest.isFresh()), premiumResponse.getApplicables());
+            final Method method = this.getClass().getMethod("handle" + Utils.capitalizeFirstLetter(key), PremiumResponse.class, PremiumRequest.class, List.class);
+            method.invoke(this, premiumResponse, premiumRequest, applicables);
+            premiumResponse.getApplicables().forEach(app -> {
                 this.applyRounding(app, attribute, key);
                 this.applyMultiplicative(app, attribute, key, "basePremium");
             });
         }
-        return amountDivision;
+        return premiumResponse;
     }
 
 
@@ -96,7 +153,7 @@ public class PremiumService {
         }
     }
 
-    public void createInsuredMapping(final AmountDivision amountDivision, final PremiumRequest premiumRequest) {
+    public void createInsuredMapping(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest) {
         for(int year =1;year <= premiumRequest.getPolicyTerm();year ++){
             for(final Insured insured : premiumRequest.getInsured()){
                 final Applicable applicable = new Applicable();
@@ -107,21 +164,12 @@ public class PremiumService {
                 applicable.setNri(insured.isNri());
                 applicable.setProposer(insured.isProposer());
                 applicable.setReflexLoadingPercentage(insured.getReflexLoading()); // TODO remove it
-                amountDivision.getApplicables().add(applicable);
+                premiumResponse.getApplicables().add(applicable);
             }
         }
     }
 
-    public void handleBonusMaximizer(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
-        if(!premiumRequest.isBonusMaximizer()){
-            return ;
-        }
-        applicables.forEach(app -> {
-            app.setBonusMaximizer(app.getBonusMaximizer() + app.getBasePremium()*bonusMaximizer);
-        });
-    }
-
-    public void handleLongTermDiscount(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleLongTermDiscount(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null != premiumRequest.getPaymentTermRequest() && premiumRequest.getPaymentTermRequest().isEmi()){
             return ;
         }
@@ -130,14 +178,16 @@ public class PremiumService {
         });
     }
 
-    public void handleEarlyRenewal(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleEarlyRenewal(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isEarlyRenewalDiscount()){
             return ;
         }
         applicables.forEach(app -> app.setEarlyRenewal(app.getEarlyRenewal() + app.getBasePremium()*earlyRenewalDiscount));
     }
 
-    public void handleCibilDiscount(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleCibilDiscount(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+        // TODO For CIBIl. Check Proposer CIBIL Score and Age , Apply discount to all the Insured
+
         if(null ==  premiumRequest.getCibilScoreRequest() || !premiumRequest.getCibilScoreRequest().isCibil()){
             return ;
         }
@@ -147,20 +197,20 @@ public class PremiumService {
         applicables.stream().filter(applicable -> 50 >= applicable.getAge()).forEach(app -> app.setCibilDiscount(app.getCibilDiscount() + app.getBasePremium()*discount));
     }
 
-    public void handleHealthQuestionnaire(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleHealthQuestionnaire(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isHealthQuestionnaire()){
             return ;
         }
         applicables.forEach(app -> app.setHealthQuestionnaire(app.getHealthQuestionnaire() + app.getBasePremium()*healthQuestionnaire));
     }
 
-    public void handlePaCover(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handlePaCover(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getPaCoverRequest() || !premiumRequest.getPaCoverRequest().isPaCover()){
             return ;
         }
 
         final String option = premiumRequest.getPaCoverRequest().getOption();
-        final Double perMile = "1".equals(option) ? 1.0d : 2.0d;
+        final Double perMile = "1".equals(option) ? 0.30d : 0.35d;
         final Double sumInsured = Double.valueOf(premiumRequest.getSumInsured());
         final Double perMileExpense = sumInsured * perMile / 1000.0d;
         final int maxAge = PremiumService.getMaxAge(applicables).orElse(0);
@@ -174,7 +224,7 @@ public class PremiumService {
         });
     }
 
-    public void handleHospitalCash(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleHospitalCash(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getHospitalCashRequest() || !premiumRequest.getHospitalCashRequest().isHospitalCash()){
             return ;
         }
@@ -184,7 +234,7 @@ public class PremiumService {
         });
     }
 
-    public void handleCompassionateVisit(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleCompassionateVisit(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isCompassionateVisit()){
             return ;
         }
@@ -193,7 +243,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setCompassionateVisit(app.getCompassionateVisit() + expense));
     }
 
-    public void handleInternationalSecondOpinion(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleInternationalSecondOpinion(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isInternationalSecondOpinion()){
             return ;
         }
@@ -201,7 +251,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setInternationalSecondOpinion(app.getInternationalSecondOpinion() + expense));
     }
 
-    public void handleAnnualHealthCheckUp(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleAnnualHealthCheckUp(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isAnnualCheckUp()){
             return ;
         }
@@ -209,7 +259,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setAnnualHealthCheckUp(Math.min(25000,app.getAnnualHealthCheckUp() + expense)));
     }
 
-    public void handleHighEndDiagnostic(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleHighEndDiagnostic(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isHighEndDiagnostic()){
             return ;
         }
@@ -217,7 +267,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setHighEndDiagnostic(app.getHighEndDiagnostic() + amount));
     }
 
-    public void handleWomenCare(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleWomenCare(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isWomenCare()){
             return ;
         }
@@ -227,7 +277,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setWomenCare(app.getWomenCare() + expense));
     }
 
-    public void handleMaternityExpense(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleMaternityExpense(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getMaternityRequest() || !premiumRequest.getMaternityRequest().isMaternityRequest()){
             return ;
         }
@@ -244,35 +294,35 @@ public class PremiumService {
             Double newBornAmount = 0.0d;
             switch (option.getOption()){
                 case "A":{
-                    if(1500.0d == option.getSubLimit()){
-                        maternityAmount = 15000.0d;
+                    if(50000.0d == option.getSubLimit()){
+                        maternityAmount = 10758.0d;
                     }
 
-                    else if(10000.0d == option.getSubLimit()){
-                        maternityAmount = 15000.0d;
+                    else if(100000.0d == option.getSubLimit()){
+                        maternityAmount = 21516.0d;
                     }
 
                     if(2500000 >= sumInsured){
-                        newBornAmount = 1000.0d;
+                        newBornAmount = 2690.0d;
                     }
 
                     else {
-                        newBornAmount = 2000.0d;
+                        newBornAmount = 4034.0d;
                     }
 
                     break;
                 }
                 case "B":{
                     if(30000.0d == option.getSubLimit()){
-                        maternityAmount = 500.0d;
+                        maternityAmount = 12551.0d;
                     }
 
                     if(2500000 >= sumInsured){
-                        newBornAmount = 2000.0d;
+                        newBornAmount = 5230.0d;
                     }
 
                     else {
-                        newBornAmount = 2500.0d;
+                        newBornAmount = 7844.0d;
                     }
 
                     break;
@@ -280,15 +330,15 @@ public class PremiumService {
                 }
                 case "C":{
                     if(500000 == sumInsured || 750000 == sumInsured){
-                        newBornAmount = 10000.0d;
+                        newBornAmount = 41932.0d;
                     }
 
                     else if(1000000 == sumInsured || 1500000 == sumInsured || 2000000 == sumInsured || 2500000 == sumInsured){
-                        newBornAmount = 10000.0d;
+                        newBornAmount = 83865.0d;
                     }
 
                     else{
-                        newBornAmount = 10000.0d;
+                        newBornAmount = 167730.0d;
                     }
                     break;
                 }
@@ -298,7 +348,9 @@ public class PremiumService {
         }
     }
 
-    public void handleNriDiscount(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleNriDiscount(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+        //TODO Proposer - Check for NRI, Insured - Check for NRI
+
         for(final Applicable app : applicables){
             if(!app.isNri()){
                 return ;
@@ -310,7 +362,7 @@ public class PremiumService {
         });
     }
 
-    public void handleWellnessDiscount(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleWellnessDiscount(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getWellnessDiscount() || !premiumRequest.getWellnessDiscount().isWellnessDiscount()){
             return ;
         }
@@ -323,7 +375,7 @@ public class PremiumService {
         });
     }
 
-    public void handleMedicalEquipmentCover(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleMedicalEquipmentCover(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isDurableMedicalEquipmentCover()){
             return ;
         }
@@ -334,7 +386,7 @@ public class PremiumService {
 
     }
 
-    public void handleSubLimitModeration(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleSubLimitModeration(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isSubLimitsForModernTreatments()){
             return ;
         }
@@ -344,7 +396,7 @@ public class PremiumService {
 
     }
 
-    public void handleRoomRent(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleRoomRent(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getRoomRent() || !premiumRequest.getRoomRent().isRent()){
             return ;
         }
@@ -355,7 +407,7 @@ public class PremiumService {
         });
     }
 
-    public void handleDeductible(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleDeductible(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getVoluntarilyDeductible() || !premiumRequest.getVoluntarilyDeductible().isDeductible()){
             return ;
         }
@@ -364,7 +416,7 @@ public class PremiumService {
         });
     }
 
-    public void handleCopay(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleCopay(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         final List<String> copayLs = Arrays.asList("10","20","30","40","50");
         if(null == premiumRequest.getVoluntarilyCopay() ||
                 !premiumRequest.getVoluntarilyCopay().isCopay() ||
@@ -374,27 +426,27 @@ public class PremiumService {
         applicables.forEach(app->app.setCopay(app.getBasePremium()*(Double.parseDouble(premiumRequest.getVoluntarilyCopay().getCopayPercent()))/100.0d));
     }
 
-    public void handlePreferredHospitalNetwork(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
-        if(!premiumRequest.isPreferredHospital()){
+    public void handlePreferredHospitalNetwork(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+        if(!premiumRequest.isSmartNetworkDiscount()){
             return ;
         }
 
         applicables.forEach(app->app.setPreferredHospitalNetwork(app.getBasePremium()* this.preferredHospitalNetwork));
     }
 
-    public void handleInfiniteCare(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
-        if(!premiumRequest.isInfiniteCare()){
+    public void handleInfiniteCare(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+        if(!premiumRequest.isLimitlessCare()){
             return ;
         }
 
         applicables.forEach(
                 app-> {
-                    app.setInfiniteCare(app.getBasePremium()* this.dynamicConfigurations.getInfiniteCare(premiumRequest.getSumInsured()));
+                    app.setLimitlessCare(app.getBasePremium()* this.dynamicConfigurations.getInfiniteCare(premiumRequest.getSumInsured()));
                 }
         );
     }
 
-    public void handlePedWaitingPeriod(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handlePedWaitingPeriod(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(null == premiumRequest.getPedWaitingRequest() || !premiumRequest.getPedWaitingRequest().isPedWaitingRequest()){
             return ;
         }
@@ -408,7 +460,7 @@ public class PremiumService {
         });
     }
 
-    public void handleSpecificDisease(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleSpecificDisease(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isReductionOnSpecificDisease()){
             return ;
         }
@@ -426,7 +478,7 @@ public class PremiumService {
                 .max(Integer::compareTo);
     }
 
-    public void handleFutureReady(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleFutureReady(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isFutureReady()){
             return ;
         }
@@ -436,7 +488,7 @@ public class PremiumService {
         applicables.forEach(app -> app.setFutureReady(app.getBasePremium()*DynamicConfigurations.getFutureReadyconf(app.getAge())));
     }
 
-    public void handleConsumableCover(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleConsumableCover(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         if(!premiumRequest.isConsumableCover()) {
             return;
         }
@@ -444,7 +496,7 @@ public class PremiumService {
         applicables.forEach(app->app.setConsumableCover(app.getBasePremium()* this.consumableCover));
     }
 
-    public void handleInstantCover(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleInstantCover(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         final Set<String> masterDiseases = Set.of("BP", "DM", "CAD", "Asthma", "Hyperlipedimia");
 
         for (final Applicable app : applicables) {
@@ -459,27 +511,27 @@ public class PremiumService {
         }
     }
 
-    public void handlePowerBooster(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
-        if(!premiumRequest.isPowerBooster())
+    public void handlePowerBooster(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+        if(!premiumRequest.isSuperstarBonus())
             return ;
 
         applicables.forEach(app -> {
-            app.setPowerBooster(app.getPowerBooster() + app.getBasePremium()* this.dynamicConfigurations.getPowerBooster(premiumRequest.getSumInsured()));
+            app.setSuperstarBonus(app.getSuperstarBonus() + app.getBasePremium()* this.dynamicConfigurations.getPowerBooster(premiumRequest.getSumInsured()));
         });
     }
 
-    public void handleReflexLoading(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleReflexLoading(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         applicables.forEach(app -> app.setReflexLoading(app.getReflexLoading() + app.getBasePremium()*app.getReflexLoadingPercentage()));
     }
 
-    public void handleFloater(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleFloater(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         final double discount = this.dynamicConfigurations.getPolicyTypeDiscount(premiumRequest.getPolicyType());
         applicables.forEach(app -> {
             app.setFloater(app.getFloater() + app.getBasePremium()*discount);
         });
     }
 
-    public void handleZonalDiscount(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleZonalDiscount(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
 
         final double discount = this.dynamicConfigurations.getZonalDiscount(premiumRequest.getZone());
 
@@ -488,64 +540,77 @@ public class PremiumService {
         });
     }
 
-    public void handleLookup(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
+    public void handleLookup(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables) {
         applicables.stream().filter(applicable -> 50 >= applicable.getYear()).forEach(applicable -> applicable.setLookup(this.premiumConfig.getPremium(applicable.getAge(), applicable.getType(), premiumRequest.getSumInsured())));
         applicables.stream().filter(applicable -> 50 < applicable.getYear()).forEach(applicable -> applicable.setLookup(this.premiumConfig.getPremium(applicable.getAge() + applicable.getYear() - 1, applicable.getType(), premiumRequest.getSumInsured())));
     }
 
-    public void handleStageIIPremium(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables){
-        amountDivision.getApplicables().forEach(
+    public void handleStageIIPremium(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        premiumResponse.getApplicables().forEach(
                 Applicable::handleStageIIPremium
         );
     }
 
-    public void handleStageIIIPremium(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables){
-        amountDivision.getApplicables().forEach(
+    public void handleStageIIIPremium(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        premiumResponse.getApplicables().forEach(
                 Applicable::handleStageIIIPremium
         );
     }
 
-    public void handleStageVPremium(final AmountDivision amountDivision, final PremiumRequest premiumRequest, final List<Applicable> applicables){
-        final Double[] finalPremium = {0.0d};
-        amountDivision.getApplicables().forEach(app -> {
-            finalPremium[0] = finalPremium[0] + app.getBasePremium();
+    public void handleCgst(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        premiumResponse.setCgst(Math.round(premiumResponse.getFinalPremium()*0.09d));
+    }
+
+    public void handleIgst(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        premiumResponse.setIgst(Math.round(premiumResponse.getFinalPremium()*0.09d));
+    }
+
+    public void handleTotalPremium(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        premiumResponse.setTotalPremium((long) (premiumResponse.getFinalPremium() + premiumResponse.getCgst() + premiumResponse.getIgst()));
+        PremiumService.handlePaymentTerm(premiumResponse, premiumRequest);
+    }
+
+    public void handleStageVPremium(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest, final List<Applicable> applicables){
+        final Long[] finalPremium = {0l};
+        premiumResponse.getApplicables().forEach(app -> {
+            finalPremium[0] = (long) (finalPremium[0] + app.getBasePremium());
         });
 
-        amountDivision.setFinalPremium(finalPremium[0]);
+        premiumResponse.setFinalPremium(finalPremium[0]);
         if(null == premiumRequest.getPaymentTermRequest() || !premiumRequest.getPaymentTermRequest().isEmi()){
             return ;
         }
-
-        PremiumService.handlePaymentTerm(amountDivision, premiumRequest);
         return ;
     }
 
-    private static void handlePaymentTerm(final AmountDivision amountDivision, final PremiumRequest premiumRequest) {
-        double emiAmount = 0.0d;
+    private static void handlePaymentTerm(final PremiumResponse premiumResponse, final PremiumRequest premiumRequest) {
+        long emiAmount = 0;
+        int instalments = 0;
+        double loading = 0d;
 
         final String duration = premiumRequest.getPaymentTermRequest().getPaymentDuration();
         if("monthly".equals(duration)){
-            amountDivision.setFinalPremium(amountDivision.getFinalPremium() + amountDivision.getFinalPremium()*0.04d);
-            emiAmount = amountDivision.getFinalPremium() / (premiumRequest.getPolicyTerm()*12);
+            instalments = premiumRequest.getPolicyTerm()*12;
+            loading = 0.04d;
         }
 
         else if("quarterly".equals(duration)){
-            amountDivision.setFinalPremium(amountDivision.getFinalPremium() + amountDivision.getFinalPremium()*0.03d);
-            emiAmount = amountDivision.getFinalPremium() / (premiumRequest.getPolicyTerm()*4);
+            instalments = premiumRequest.getPolicyTerm()*4;
+            loading = 0.03d;
         }
 
         else {
-            emiAmount = amountDivision.getFinalPremium() / (premiumRequest.getPolicyTerm()*2);
+            instalments = premiumRequest.getPolicyTerm()*2;
         }
 
-        amountDivision.setEmiResponse(
+        premiumResponse.setTotalPremium((long) (premiumResponse.getTotalPremium() + premiumResponse.getTotalPremium()*loading));
+        emiAmount =  Math.round((float) premiumResponse.getTotalPremium() / instalments);
+        premiumResponse.setEmiResponse(
                 EmiResponse.builder()
                         .amount(emiAmount)
+                        .duration(premiumRequest.getPaymentTermRequest().getPaymentDuration())
+                        .instalments(instalments)
                         .emi(true)
                         .build());
-    }
-
-    public String test(final String var){
-        return var;
     }
 }

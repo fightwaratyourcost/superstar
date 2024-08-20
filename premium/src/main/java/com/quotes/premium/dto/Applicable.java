@@ -18,13 +18,13 @@ public class Applicable {
     private Double preferredHospitalNetwork = 0.0d;
     private Double copay = 0.0d;
     private Double deductible = 0.0d;
-    private Double powerBooster = 0.0d;
+    private Double superstarBonus = 0.0d;
     private Double instantCover = 0.0d;
     private Double consumableCover = 0.0d;
     private Double futureReady = 0.0d;
     private Double pedWaitingPeriod = 0.0d;
     private Double specificDisease = 0.0d;
-    private Double infiniteCare = 0.0d;
+    private Double limitlessCare = 0.0d;
     private Double sharedRoomDiscount = 0.0d;
     private Double subLimitModeration = 0.0d;
     private Double medicalEquipmentCover = 0.0d;
@@ -44,7 +44,6 @@ public class Applicable {
     private Double earlyRenewal = 0.0d;
     private Double longTermDiscount = 0.0d;
     private Double reflexLoading = 0.0d;
-    private Double bonusMaximizer = 0.0d;
 
     private String type;
     private int age;
